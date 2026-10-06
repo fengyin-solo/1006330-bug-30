@@ -2,7 +2,7 @@
   <section class="page" data-module="hazard">
     <header class="page-head">
       <div>
-        <h2>隐患整改管理管理</h2>
+        <h2>{{ meta.name }}</h2>
         <p class="page-desc">维护隐患记录，围绕隐患编号、隐患部位、隐患等级、整改措施做登记、筛选与状态流转。</p>
       </div>
       <div class="page-actions">
@@ -72,32 +72,68 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import {
   downloadEntries,
+  filterRows,
   listEntries,
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { countHazardStatus } from '@/data/hazard'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('hazard')
 const columns = ["隐患编号", "隐患部位", "隐患等级", "整改措施", "责任人员", "发现日期", "整改期限", "整改状态"]
 const actions = ["派发整改", "提交验收", "标记逾期"]
 const statuses = ["待整改", "整改中", "已验收", "已逾期"]
-const stats = [{"label": "待整改隐患", "value": 0}, {"label": "整改中隐患", "value": 0}, {"label": "已逾期隐患", "value": 0}]
+
+const route = useRoute()
+const router = useRouter()
 
 const rows = ref<EntryRow[]>([])
+// 统计口径用全量数据，与运营概览、导出清单读同一份；表格里只放筛选后的那几条。
+const moduleRows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ["隐患编号", "隐患部位", "隐患等级", "整改状态"]
+
+const stats = computed(() => [
+  { label: '待整改隐患', value: countHazardStatus(moduleRows.value, '待整改') },
+  { label: '整改中隐患', value: countHazardStatus(moduleRows.value, '整改中') },
+  { label: '已逾期隐患', value: countHazardStatus(moduleRows.value, '已逾期') },
+])
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
-    count: rows.value.filter((row) => String(row.status) === status).length,
+    count: countHazardStatus(moduleRows.value, status),
   })),
 )
+
+function activeFilters(): Record<string, string> {
+  const query: Record<string, string> = {}
+  for (const field of filterFields) {
+    const value = (filters.value[field] ?? '').trim()
+    if (value !== '') {
+      query[field] = value
+    }
+  }
+  return query
+}
+
+// 筛选条件同步进地址栏：往后再回来时定位不跑偏。
+function syncQuery() {
+  const next = activeFilters()
+  const current = route.query
+  const same =
+    Object.keys(next).length === Object.keys(current).length &&
+    Object.entries(next).every(([field, value]) => current[field] === value)
+  if (!same) {
+    void router.replace({ query: next })
+  }
+}
 
 function resetFilters() {
   filters.value = {}
@@ -105,7 +141,11 @@ function resetFilters() {
 }
 
 function exportRows() {
-  downloadEntries(meta.key)
+  try {
+    downloadEntries(meta.key, filters.value)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '隐患整改管理清单导出失败'
+  }
 }
 
 function openCreate() {
@@ -125,13 +165,24 @@ function runAction(action: string, row: EntryRow) {
 function reload() {
   errorMessage.value = ''
   try {
-    const payload = listEntries(meta.key, filters.value)
-    rows.value = payload.items
-    total.value = payload.total
+    const payload = listEntries(meta.key)
+    moduleRows.value = payload.items
+    rows.value = filterRows(payload.items, filters.value)
+    total.value = rows.value.length
+    syncQuery()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '隐患整改管理列表读取失败'
   }
 }
 
-onMounted(reload)
+onMounted(() => {
+  // 从地址栏恢复上次的筛选条件。
+  for (const field of filterFields) {
+    const value = route.query[field]
+    if (typeof value === 'string' && value !== '') {
+      filters.value[field] = value
+    }
+  }
+  reload()
+})
 </script>
