@@ -75,29 +75,57 @@ import { computed, onMounted, ref } from 'vue'
 
 import {
   downloadEntries,
+  hazardStats,
   listEntries,
   moduleMeta,
   runAction as applyAction,
+  runWithRetry,
 } from '@/api/local-service'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('hazard')
-const columns = ["隐患编号", "隐患部位", "隐患等级", "整改措施", "责任人员", "发现日期", "整改期限", "整改状态"]
+const columns = ["隐患编号", "隐患部位", "隐患等级", "整改措施", "责任人员", "发现日期", "整改期限", "逾期标记", "整改状态"]
 const actions = ["派发整改", "提交验收", "标记逾期"]
 const statuses = ["待整改", "整改中", "已验收", "已逾期"]
-const stats = [{"label": "待整改隐患", "value": 0}, {"label": "整改中隐患", "value": 0}, {"label": "已逾期隐患", "value": 0}]
+
+// 筛选条件留在会话里：收窄到需要的那几条之后，再回来时定位不跑偏。
+const FILTER_CACHE_KEY = 'urban-utility-tunnel:hazard-filters'
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ["隐患编号", "隐患部位", "隐患等级", "整改状态"]
+const stats = ref([
+  { label: '待整改隐患', value: 0 },
+  { label: '整改中隐患', value: 0 },
+  { label: '已逾期隐患', value: 0 },
+])
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+function restoreFilters() {
+  try {
+    const raw = window.sessionStorage.getItem(FILTER_CACHE_KEY)
+    if (raw) {
+      filters.value = JSON.parse(raw) as Record<string, string>
+    }
+  } catch {
+    filters.value = {}
+  }
+}
+
+function rememberFilters() {
+  try {
+    window.sessionStorage.setItem(FILTER_CACHE_KEY, JSON.stringify(filters.value))
+  } catch {
+    // 会话存储不可用时只影响条件记忆，不影响查询本身
+  }
+}
 
 function resetFilters() {
   filters.value = {}
@@ -114,24 +142,42 @@ function openCreate() {
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
-  if (!result.ok) {
-    errorMessage.value = result.message
+  const attempt = runWithRetry(() => applyAction(meta.key, Number(row.id), action), `隐患记录${action}`)
+  if (!attempt.ok) {
+    errorMessage.value = attempt.message
+    return
+  }
+  if (!attempt.value.ok) {
+    errorMessage.value = attempt.value.message
     return
   }
   reload()
 }
 
-function reload() {
-  errorMessage.value = ''
-  try {
-    const payload = listEntries(meta.key, filters.value)
-    rows.value = payload.items
-    total.value = payload.total
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '隐患整改管理列表读取失败'
-  }
+function refreshStats() {
+  const summary = hazardStats()
+  stats.value = [
+    { label: '待整改隐患', value: summary.waiting },
+    { label: '整改中隐患', value: summary.rectifying },
+    { label: '已逾期隐患', value: summary.overdue },
+  ]
 }
 
-onMounted(reload)
+function reload() {
+  errorMessage.value = ''
+  rememberFilters()
+  const attempt = runWithRetry(() => listEntries(meta.key, filters.value), '隐患整改管理列表读取')
+  if (!attempt.ok) {
+    errorMessage.value = attempt.message
+    return
+  }
+  rows.value = attempt.value.items
+  total.value = attempt.value.total
+  refreshStats()
+}
+
+onMounted(() => {
+  restoreFilters()
+  reload()
+})
 </script>

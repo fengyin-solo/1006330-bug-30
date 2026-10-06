@@ -36,3 +36,10 @@ export type OverviewResult = {
   cards: { label: string; value: number }[]
   modules: { name: string; created: number; pending: number; abnormal: number }[]
 }
+
+export type MissingItem = {
+  module: string
+  id: number
+  label: string
+  fields: string[]
+}
